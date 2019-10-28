@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,7 +26,7 @@ type Result struct {
 }
 
 // 配置参数
-var x, y, n int
+var x, y, n, concurrentNum int
 var shouldPrint bool // 是否打印过程
 
 var filter map[string]int = make(map[string]int) // 重复结果
@@ -89,6 +90,13 @@ func popSet(preSet, curSet *IntSet, m []*Record, index int) {
 }
 
 func BeginTask(m []*Record, n, maxCount int) {
+	for i := 1; i < concurrentNum; i++ {
+		go beginTask(m, n, maxCount, i)
+	}
+	beginTask(m, n, maxCount, 0)
+}
+
+func beginTask(m []*Record, n, maxCount, idx int) {
 	var stack Stack
 	var setstack SetStack
 
@@ -186,6 +194,8 @@ func startOuputRuntine() {
 }
 
 func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 	// 读取配置
 	if bytes, err := ioutil.ReadFile(ConfigFileName); err != nil {
 		fmt.Printf("read configuration file error:%v, filename:%v", err, ConfigFileName)
@@ -196,11 +206,18 @@ func main() {
 		x = config["X"]
 		y = config["Y"]
 		n = config["N"]
+
 		maxFlushLength = config["MaxFlushLength"]
+
 		if config["Print"] != 0 {
 			shouldPrint = true
 		} else {
 			shouldPrint = false
+		}
+
+		concurrentNum = config["Concurrent"]
+		if concurrentNum == 0 {
+			concurrentNum = runtime.NumCPU()
 		}
 	}
 
