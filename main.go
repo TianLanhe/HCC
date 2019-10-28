@@ -24,7 +24,10 @@ type Result struct {
 	N      int
 }
 
+// 配置参数
 var x, y, n int
+var shouldPrint bool // 是否打印过程
+
 var filter map[string]int = make(map[string]int) // 重复结果
 var results []Result                             // 缓存结果，已去重
 var total uint64                                 // 结果总数
@@ -34,15 +37,22 @@ var outFile *os.File // 输出文件句柄
 
 var maxFlushLength int // 结果达到一定量进行刷新
 
+var resultChan chan IntSet // 结果通道
+var exitChan chan struct{} // 退出信号
+
 var totalSet IntSet
 
 const (
 	InputFileName  string = "data.txt"
 	OutputFileName string = "output.txt"
 	ConfigFileName string = "config.json"
+
+	ChanLength = 10000 // 通道长度
 )
 
-var shouldPrint bool
+func OutputAResulst(set IntSet) {
+	resultChan <- set
+}
 
 func DealOneResult(set IntSet) {
 	tempSet := totalSet.Copy()
@@ -96,7 +106,7 @@ func BeginTask(m []*Record, n, maxCount int) {
 		}
 
 		if !needPop && stack.Len() == n {
-			DealOneResult(setstack.Top())
+			OutputAResulst(setstack.Top())
 			needPop = true
 		}
 
@@ -160,6 +170,21 @@ func flushToFile(results []Result) {
 	mutex.Unlock()
 }
 
+func startOuputRuntine() {
+	go func() {
+		for {
+			select {
+			case result := <-resultChan:
+				DealOneResult(result)
+			case <-exitChan:
+				flushToFile(results)
+				exitChan <- struct{}{}
+				return
+			}
+		}
+	}()
+}
+
 func main() {
 	// 读取配置
 	if bytes, err := ioutil.ReadFile(ConfigFileName); err != nil {
@@ -192,6 +217,9 @@ func main() {
 	for i := 1; i <= x; i++ {
 		totalSet.Add(i)
 	}
+
+	exitChan = make(chan struct{})
+	resultChan = make(chan IntSet, ChanLength)
 
 	// 打开输入文件
 	file, err := os.Open(InputFileName)
@@ -245,6 +273,9 @@ func main() {
 	// 	}
 	// }()()
 
+	// 开启输出协程专门负责输出文件
+	startOuputRuntine()
+
 	startTime := time.Now()
 
 	// 开始处理
@@ -252,7 +283,8 @@ func main() {
 
 	endTime := time.Now()
 
-	flushToFile(results)
+	exitChan <- struct{}{}
+	<-exitChan
 
 	fmt.Printf("运行耗时：%d min %d sec\n", (endTime.Unix()-startTime.Unix())/60, (endTime.Unix()-startTime.Unix())%60)
 	fmt.Printf("I/O耗时：%d ms\n", ioTime)

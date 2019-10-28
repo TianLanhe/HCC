@@ -3,3 +3,5 @@ old/*
 .idea
 
 *.exe
+
+output.txt
