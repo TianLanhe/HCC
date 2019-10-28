@@ -1,0 +1,224 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+type Record struct {
+	Name string
+	Set  IntSet
+}
+
+type Result struct {
+	Prefix string
+	Num    string
+	N      int
+}
+
+var filter map[string]int = make(map[string]int)
+var results []Result
+var repeat []Result
+var flag string
+
+func DealOneResult(m []*Record, indexs []int) {
+	set := m[indexs[0]].Set.Copy()
+	for i := 1; i < len(indexs); i++ {
+		set.UnionWith(m[indexs[i]].Set)
+	}
+
+	result := Result{}
+	result.Num = fmt.Sprintf("%v", set)
+	result.N = set.Len()
+
+	for i := 0; i < len(indexs); i++ {
+		result.Prefix += m[indexs[i]].Name
+	}
+
+	if _, ok := filter[result.Num]; !ok {
+		filter[result.Num] = 1
+
+		results = append(results, result)
+	} else {
+		repeat = append(repeat, result)
+		filter[result.Num]++
+	}
+}
+
+func checkNeedPop(m []*Record, indexs []int, maxCount int) bool {
+	set := m[indexs[0]].Set.Copy()
+	for i := 1; i < len(indexs); i++ {
+		set.UnionWith(m[indexs[i]].Set)
+	}
+
+	return set.Len() > maxCount
+}
+
+func BeginTask(m []*Record, n, maxCount int) {
+	var stack Stack
+	mSize := len(m)
+	needPop := false
+	stack.Push(0)
+	for !stack.Empty() {
+		if flag == "y" || flag == "Y" {
+			fmt.Println(stack.Elems())
+		}
+
+		if !needPop && stack.Len() == n {
+			DealOneResult(m, stack.Elems())
+			needPop = true
+		}
+
+		last := stack.Top()
+		if last == mSize-1 || mSize-1-last < n-stack.Len() {
+			stack.Pop()
+			needPop = true
+			continue
+		}
+
+		if needPop {
+			stack.Pop()
+			needPop = false
+		}
+
+		if last+1 < mSize {
+			stack.Push(last + 1)
+			needPop = checkNeedPop(m, stack.Elems(), maxCount)
+		}
+	}
+}
+
+func saveToFile(results []Result) {
+	// 打开输出文件
+	file, err := os.Create("output.txt")
+	if err != nil {
+		fmt.Printf("Create File Error:%v\n", err)
+		os.Exit(1)
+	}
+
+	count := 0
+	for i := 0; i < len(results); i++ {
+		fmt.Fprintf(file, "%s:%s (共%02d个，重复次数：%d)\r\n", results[i].Prefix, results[i].Num, results[i].N, filter[results[i].Num])
+		count++
+	}
+	file.Close()
+}
+
+func main() {
+	for {
+		results = make([]Result, 0)
+		repeat = make([]Result, 0)
+		filter = make(map[string]int)
+
+		var x, y int
+		// 输入X
+		fmt.Print("请输入X：")
+		fmt.Scan(&x)
+		if x < 1 || x > 50 {
+			fmt.Println("X should between 1 to 50")
+			os.Exit(1)
+		}
+
+		// 输入Y
+		fmt.Print("请输入Y：")
+		fmt.Scan(&y)
+		if y < 0 || y > 10 {
+			fmt.Println("Y should between 0 to 10")
+			os.Exit(1)
+		}
+		// x = 10
+		// y = 9
+
+		// 打开输入文件
+		file, err := os.Open("data.txt")
+		if err != nil {
+			fmt.Printf("Open File Error:%v\n", err)
+			os.Exit(1)
+		}
+
+		// 读取文件
+		m := []*Record{}
+		count := uint64(0)
+		rd := bufio.NewReader(file)
+		for {
+			//以'\n'为结束符读入一行
+			line, err := rd.ReadString('\n')
+			line = strings.Trim(line, "\r\n")
+
+			if (err != nil || io.EOF == err) && len(line) == 0 {
+				break
+			}
+
+			count++
+			slice := strings.Split(line, ",")
+			var set IntSet
+			for _, num := range slice {
+				n, err := strconv.ParseInt(num, 10, 32)
+				if err != nil {
+					fmt.Printf("string convert error:%v, num:%v\n", err, num)
+					continue
+				} else if n > int64(x) {
+					fmt.Printf("i:%d, n:%v, x:%v\n", count, n, x)
+					continue
+				}
+				set.Add(int(n))
+			}
+			m = append(m, &Record{strconv.FormatUint(count, 10), set})
+		}
+		file.Close()
+
+		// 读取完毕
+		for _, record := range m {
+			fmt.Printf("%s:%s\n", record.Name, record.Set)
+		}
+		fmt.Printf("文件读取完毕！共读取 %d 行\n", len(m))
+
+		// 输入N
+		var n int
+		fmt.Print("请输入N：")
+		fmt.Scan(&n)
+		if n < 1 || n > len(m) {
+			fmt.Printf("N should between 1 to %d\n", len(m))
+			os.Exit(1)
+		}
+
+		// 询问是否打印过程
+		fmt.Print("是否打印过程(y or n)：")
+		fmt.Scan(&flag)
+		// n = 2
+		// flag = "n"
+
+		// 记录耗时
+		// defer func() func() {
+		// 	start := time.Now()
+		// 	return func() {
+		// 		fmt.Printf("耗时 %v s\n", time.Now().Sub(start).Seconds())
+		// 	}
+		// }()()
+
+		startTime := time.Now()
+
+		// 开始处理
+		BeginTask(m, n, x-y)
+
+		endTime := time.Now()
+
+		fmt.Printf("运行耗时：%d min %d sec\n", (endTime.Unix()-startTime.Unix())/60, (endTime.Unix()-startTime.Unix())%60)
+
+		// 打印结果
+		fmt.Printf("一共有 %d 条结果！\n", len(results))
+		fmt.Printf("已经去掉 %d 条重复结果！\n", len(repeat))
+
+		// 保存到文件
+		saveToFile(results)
+
+		/*for i := 0;i<100;i++{
+			fmt.Printf("%s:%s\n",repeat[i].Prefix,repeat[i].Num)
+		}*/
+	}
+}

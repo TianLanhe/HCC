@@ -1,0 +1,267 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Record struct {
+	Name string
+	Set  IntSet
+}
+
+type Result struct {
+	Prefix string
+	Num    string
+	N      int
+}
+
+var x, y, n int
+var filter map[string]int = make(map[string]int) // 重复结果
+var results []Result                             // 缓存结果，已去重
+var total uint64                                 // 结果总数
+var mutex sync.Mutex
+var ioTime int64     // io总时间
+var outFile *os.File // 输出文件句柄
+
+var maxFlushLength int // 结果达到一定量进行刷新
+
+var totalSet IntSet
+
+const (
+	InputFileName  string = "data.txt"
+	OutputFileName string = "output.txt"
+	ConfigFileName string = "config.json"
+)
+
+var shouldPrint bool
+
+func DealOneResult(set IntSet) {
+	tempSet := totalSet.Copy()
+	tempSet.DifferentWith(set)
+
+	result := Result{
+		Num: fmt.Sprintf("%v", tempSet),
+		N:   x - set.Len(),
+	}
+
+	if _, ok := filter[result.Num]; !ok {
+		filter[result.Num] = 1
+
+		if len(results) == maxFlushLength {
+			go flushToFile(results)
+			results = make([]Result, 0, maxFlushLength+1)
+		}
+		results = append(results, result)
+	} else {
+		filter[result.Num]++
+	}
+}
+
+func pushSet(preSet, curSet *IntSet, m []*Record, index int) {
+	*preSet = *curSet
+	curSet.UnionWith(m[index].Set)
+}
+
+func popSet(preSet, curSet *IntSet, m []*Record, index int) {
+	temp := *preSet
+	*preSet = *curSet
+	curSet.DifferentWith(m[index].Set)
+	curSet.UnionWith(temp)
+}
+
+func BeginTask(m []*Record, n, maxCount int) {
+	var stack Stack
+	var setstack SetStack
+
+	mSize := len(m)
+	needPop := false
+
+	count := 0
+
+	stack.Push(0)
+	setstack.Push(m[0].Set)
+	for !stack.Empty() {
+		if shouldPrint && count == 0 {
+			fmt.Println(stack.Elems(), "total: ", len(filter))
+			count++
+		}
+
+		if !needPop && stack.Len() == n {
+			DealOneResult(setstack.Top())
+			needPop = true
+		}
+
+		last := stack.Top()
+		if last == mSize-1 || mSize-1-last < n-stack.Len() {
+			stack.Pop()
+			setstack.Pop()
+			needPop = true
+
+			count++
+			if count == 500000 {
+				count = 0
+			}
+			continue
+		}
+
+		if needPop {
+			stack.Pop()
+			setstack.Pop()
+			needPop = false
+		}
+
+		if last+1 < mSize {
+			stack.Push(last + 1)
+
+			if setstack.Empty() {
+				setstack.Push(*m[last+1].Set.Copy())
+
+				needPop = m[last+1].Set.Len() > maxCount
+			} else {
+				a := setstack.Top()
+				temp := a.Copy()
+				temp.UnionWith(m[last+1].Set)
+				setstack.Push(*temp)
+
+				needPop = temp.Len() > maxCount
+			}
+		}
+	}
+}
+
+func flushToFile(results []Result) {
+	mutex.Lock()
+	startTime := time.Now()
+
+	for i := 0; i < len(results); i++ {
+		fmt.Fprintf(outFile, "%s\r\n", results[i].Num)
+	}
+
+	milis := (time.Now().UnixNano() - startTime.UnixNano()) / 100000
+
+	fmt.Printf("本次输出 %d 条结果\n", len(results))
+	fmt.Printf("本次I/O耗时 %d ms\n", milis)
+
+	total += uint64(len(results))
+	ioTime += milis
+
+	fmt.Printf("累计输出 %d 条结果\n", total)
+	fmt.Printf("累计I/O耗时 %d ms\n\n", ioTime)
+
+	mutex.Unlock()
+}
+
+func main() {
+	// 读取配置
+	if bytes, err := ioutil.ReadFile(ConfigFileName); err != nil {
+		fmt.Printf("read configuration file error:%v, filename:%v", err, ConfigFileName)
+		os.Exit(1)
+	} else {
+		config := make(map[string]int)
+		json.Unmarshal(bytes, &config)
+		x = config["X"]
+		y = config["Y"]
+		n = config["N"]
+		maxFlushLength = config["MaxFlushLength"]
+		if config["Print"] != 0 {
+			shouldPrint = true
+		} else {
+			shouldPrint = false
+		}
+	}
+
+	// 初始化全局变量
+	var err error
+	results = make([]Result, 0, maxFlushLength+1)
+	filter = make(map[string]int)
+	total = 0
+	ioTime = 0
+	if outFile, err = os.Create(OutputFileName); err != nil {
+		fmt.Printf("create output file error:%v, filename:%v", err, OutputFileName)
+		os.Exit(1)
+	}
+	for i := 1; i <= x; i++ {
+		totalSet.Add(i)
+	}
+
+	// 打开输入文件
+	file, err := os.Open(InputFileName)
+	if err != nil {
+		fmt.Printf("Open File Error:%v\n", err)
+		os.Exit(1)
+	}
+
+	// 读取文件
+	m := []*Record{}
+	count := uint64(0)
+	rd := bufio.NewReader(file)
+	for {
+		//以'\n'为结束符读入一行
+		line, err := rd.ReadString('\n')
+		line = strings.Trim(line, "\r\n")
+
+		if (err != nil || io.EOF == err) && len(line) == 0 {
+			break
+		}
+
+		count++
+		slice := strings.Split(line, ",")
+		var set IntSet
+		for _, num := range slice {
+			n, err := strconv.ParseInt(num, 10, 32)
+			if err != nil {
+				fmt.Printf("string convert error:%v, num:%v\n", err, num)
+				continue
+			} else if n > int64(x) {
+				fmt.Printf("i:%d, n:%v, x:%v\n", count, n, x)
+				continue
+			}
+			set.Add(int(n))
+		}
+		m = append(m, &Record{strconv.FormatUint(count, 10), set})
+	}
+	file.Close()
+
+	// 读取完毕
+	for _, record := range m {
+		fmt.Printf("%s:%s\n", record.Name, record.Set)
+	}
+	fmt.Printf("文件读取完毕！共读取 %d 行\n", len(m))
+
+	// 记录耗时
+	// defer func() func() {
+	// 	start := time.Now()
+	// 	return func() {
+	// 		fmt.Printf("耗时 %v s\n", time.Now().Sub(start).Seconds())
+	// 	}
+	// }()()
+
+	startTime := time.Now()
+
+	// 开始处理
+	BeginTask(m, n, x-y)
+
+	endTime := time.Now()
+
+	flushToFile(results)
+
+	fmt.Printf("运行耗时：%d min %d sec\n", (endTime.Unix()-startTime.Unix())/60, (endTime.Unix()-startTime.Unix())%60)
+	fmt.Printf("I/O耗时：%d ms\n", ioTime)
+	fmt.Printf("输出结果数量：%d\n", total)
+	repeat := uint64(0)
+	for _, val := range filter {
+		repeat += uint64(val)
+	}
+	fmt.Printf("筛除重复结果数量：%d\n", repeat-total)
+
+	outFile.Close()
+}
