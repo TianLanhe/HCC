@@ -49,6 +49,7 @@ const (
 	ConfigFileName string = "config.json"
 
 	ChanLength = 10000 // 通道长度
+	PrintSize = 500000 // 打印提示的间隔
 )
 
 func OutputAResulst(set IntSet) {
@@ -90,20 +91,28 @@ func popSet(preSet, curSet *IntSet, m []*Record, index int) {
 }
 
 func BeginTask(m []*Record, n, maxCount int) {
+	finishChan := make(chan struct{},concurrentNum)
+
 	for i := 1; i < concurrentNum; i++ {
-		go beginTask(m, n, maxCount, i)
+		go beginTask(m, n, maxCount, i,finishChan)
 	}
-	beginTask(m, n, maxCount, 0)
+	beginTask(m, n, maxCount, 0,nil)
+
+	for i:=1;i<concurrentNum;i++{
+		<-finishChan
+	}
+	close(finishChan)
 }
 
-func beginTask(m []*Record, n, maxCount, idx int) {
+func beginTask(m []*Record, n, maxCount, idx int,finish chan struct{}) {
 	var stack Stack
 	var setstack SetStack
 
 	mSize := len(m)
 	needPop := false
+	count := 0	// 用来打印的计数器
 
-	count := 0
+	step := 1	// 步长
 
 	stack.Push(0)
 	setstack.Push(m[0].Set)
@@ -119,13 +128,14 @@ func beginTask(m []*Record, n, maxCount, idx int) {
 		}
 
 		last := stack.Top()
-		if last == mSize-1 || mSize-1-last < n-stack.Len() {
+		stackSize := stack.Len()
+		if last == mSize-1 || mSize-1-last < n- stackSize {
 			stack.Pop()
 			setstack.Pop()
 			needPop = true
 
 			count++
-			if count == 500000 {
+			if count == PrintSize {
 				count = 0
 			}
 			continue
@@ -134,10 +144,36 @@ func beginTask(m []*Record, n, maxCount, idx int) {
 		if needPop {
 			stack.Pop()
 			setstack.Pop()
+			stackSize--
 			needPop = false
 		}
 
-		if last+1 < mSize {
+		if stackSize == n - 1 {
+			if last + step + idx < mSize {
+				index := last + step + idx
+
+				stack.Push(index)
+
+				if setstack.Empty() {
+					setstack.Push(*m[index].Set.Copy())
+
+					needPop = m[index].Set.Len() > maxCount
+				} else {
+					a := setstack.Top()
+					temp := a.Copy()
+					temp.UnionWith(m[index].Set)
+					setstack.Push(*temp)
+
+					needPop = temp.Len() > maxCount
+				}
+
+				step = concurrentNum
+				idx = 0
+			} else {
+				step -= mSize - last - idx - 1
+				needPop = true
+			}
+		}else if last+1 < mSize {
 			stack.Push(last + 1)
 
 			if setstack.Empty() {
@@ -153,6 +189,10 @@ func beginTask(m []*Record, n, maxCount, idx int) {
 				needPop = temp.Len() > maxCount
 			}
 		}
+	}
+
+	if finish != nil {
+		finish <- struct{}{}
 	}
 }
 
@@ -185,9 +225,16 @@ func startOuputRuntine() {
 			case result := <-resultChan:
 				DealOneResult(result)
 			case <-exitChan:
-				flushToFile(results)
-				exitChan <- struct{}{}
-				return
+				for {
+					select {
+					case result := <-resultChan:
+						DealOneResult(result)
+					default:
+						flushToFile(results)
+						exitChan <- struct{}{}
+						return
+					}
+				}
 			}
 		}
 	}()
